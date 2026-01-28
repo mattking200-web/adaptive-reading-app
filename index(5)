@@ -1,0 +1,522 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, doc, setDoc, onSnapshot } from 'firebase/firestore';
+
+const isInternalEnv = typeof __firebase_config !== 'undefined';
+const firebaseConfig = isInternalEnv ? JSON.parse(__firebase_config) : { apiKey: "placeholder" };
+const envAppId = typeof __app_id !== 'undefined' ? __app_id : 'reading-app-preview';
+const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+const apiKey = ""; 
+
+const GEMINI_TEXT_MODEL = 'gemini-2.5-flash-preview-09-2025';
+const GEMINI_TEXT_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_TEXT_MODEL}:generateContent?key=${apiKey}`;
+const IMAGEN_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/imagen-4.0-generate-001:predict?key=${apiKey}`;
+
+const DRA_LEVELS = [
+  "A1 (Pre-Reader)", "A2 (Emergent)", "1 (Emergent)", "2 (Beginning)", "3 (Beginning)",
+  "4 (Beginning)", "6 (Beginning)", "8 (Developing)", "10 (Developing)", "12 (Developing)",
+  "14 (Intermediate)", "16 (Intermediate)", "18 (Intermediate)", "20 (Advanced)", "24 (Advanced)",
+  "28 (Fluent)", "30 (Fluent)", "34 (Fluent)", "38 (Extended)", "40 (Extended)",
+  "50 (Advanced Fluent)", "60 (Mastery)"
+];
+
+const ACCURACY_THRESHOLD = 0.90; 
+const SUCCESS_STREAK_TO_ADVANCE = 2; 
+
+const getNormalizedWords = (text) => {
+    if (!text) return [];
+    return text.toLowerCase().replace(/[^a-z0-9'\s]/g, ' ').replace(/\s+/g, ' ').trim().split(' ').filter(w => w.length > 0);
+};
+
+const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+function App() {
+  const [db, setDb] = useState(null);
+  const [user, setUser] = useState(null);
+  
+  const [currentProfileName, setCurrentProfileName] = useState('PreviewStudent');
+  const [currentLevelIndex, setCurrentLevelIndex] = useState(0);
+  const [successStreak, setSuccessStreak] = useState(0);
+  const [currentBook, setCurrentBook] = useState(null);
+  const [isListening, setIsListening] = useState(false);
+  const [capturedTranscript, setCapturedTranscript] = useState('');
+  const [message, setMessage] = useState('Ready to Read');
+  const [sessionResults, setSessionResults] = useState(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isCountingDown, setIsCountingDown] = useState(false);
+  const [countdown, setCountdown] = useState(0);
+  
+  const [wordExplanation, setWordExplanation] = useState(null);
+  const [quiz, setQuiz] = useState(null);
+  const [quizAnswers, setQuizAnswers] = useState({});
+  const [isAiProcessing, setIsAiProcessing] = useState(false);
+  const [aiCoachFeedback, setAiCoachFeedback] = useState('');
+  const [storyImage, setStoryImage] = useState(null);
+  const [isImageGenerating, setIsImageGenerating] = useState(false);
+
+  const recognitionRef = useRef(null);
+  const isManuallyStopping = useRef(false);
+
+  useEffect(() => {
+    if (!isInternalEnv) return;
+    try {
+      const app = initializeApp(firebaseConfig);
+      const auth = getAuth(app);
+      setDb(getFirestore(app));
+
+      const initAuth = async () => {
+        if (initialAuthToken) {
+          await signInWithCustomToken(auth, initialAuthToken);
+        } else {
+          await signInAnonymously(auth);
+        }
+      };
+      initAuth();
+      const unsubscribe = onAuthStateChanged(auth, setUser);
+      return () => unsubscribe();
+    } catch (e) {
+      console.error(e);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (SpeechRecognition && !recognitionRef.current) {
+        const recognition = new SpeechRecognition();
+        // Setting continuous to true prevents it from stopping automatically on silence
+        recognition.continuous = true; 
+        recognition.interimResults = true;
+        recognition.lang = 'en-US';
+
+        recognition.onresult = (e) => {
+            let str = '';
+            for (let i = 0; i < e.results.length; ++i) {
+                str += e.results[i][0].transcript;
+            }
+            setCapturedTranscript(str);
+        };
+
+        recognition.onend = () => {
+            // Only stop the UI state if we intended to stop or if it crashed
+            if (!isManuallyStopping.current && isListening) {
+                try {
+                    recognition.start(); // Restart if it ended prematurely due to a glitch
+                } catch (e) {
+                    setIsListening(false);
+                }
+            } else {
+                setIsListening(false);
+            }
+        };
+
+        recognition.onerror = (e) => {
+            console.error("Speech Recognition Error", e.error);
+            if (e.error === 'network') {
+                setMessage("Network Error. Try again.");
+                setIsListening(false);
+            }
+        };
+
+        recognitionRef.current = recognition;
+    }
+  }, [isListening]);
+
+  useEffect(() => {
+    if (!db || !user) return;
+    const docRef = doc(db, 'artifacts', envAppId, 'public', 'data', 'reading_profiles', currentProfileName);
+    return onSnapshot(docRef, (snap) => {
+      if (snap.exists()) {
+        const d = snap.data();
+        if (d.currentLevelIndex !== undefined) setCurrentLevelIndex(d.currentLevelIndex);
+        if (d.successStreak !== undefined) setSuccessStreak(d.successStreak);
+      }
+    }, (err) => console.error(err));
+  }, [db, user, currentProfileName]);
+
+  const callGemini = async (prompt) => {
+    let retries = 0;
+    const delays = [1000, 2000, 4000, 8000, 16000];
+    while (retries < 5) {
+      try {
+        const res = await fetch(GEMINI_TEXT_API_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+        });
+        const data = await res.json();
+        return data.candidates?.[0]?.content?.parts?.[0]?.text;
+      } catch (e) {
+        retries++;
+        if (retries === 5) throw e;
+        await new Promise(r => setTimeout(r, delays[retries - 1]));
+      }
+    }
+  };
+
+  const generateImage = async (storyText) => {
+    setIsImageGenerating(true);
+    try {
+        const promptGen = `Generate a short, vivid, child-friendly illustration prompt for an image generator based on this story: "${storyText}". Make it look like a colorful storybook illustration.`;
+        const visualPrompt = await callGemini(promptGen);
+        const res = await fetch(IMAGEN_API_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ instances: { prompt: visualPrompt }, parameters: { sampleCount: 1 } })
+        });
+        const data = await res.json();
+        const imageUrl = `data:image/png;base64,${data.predictions[0].bytesBase64Encoded}`;
+        setStoryImage(imageUrl);
+    } catch (e) {
+        console.error("Image Generation Failed", e);
+    } finally {
+        setIsImageGenerating(false);
+    }
+  };
+
+  const generateBook = async (customLvlIndex = null, isExpansion = false) => {
+    setIsLoading(true);
+    setSessionResults(null);
+    setQuiz(null);
+    setQuizAnswers({});
+    setWordExplanation(null);
+    setAiCoachFeedback('');
+    setStoryImage(null);
+    setMessage(isExpansion ? "Expanding the story..." : "Writing a new story...");
+    
+    try {
+      const idx = customLvlIndex !== null ? customLvlIndex : currentLevelIndex;
+      const level = DRA_LEVELS[idx];
+      let prompt = `Write a short story for a child at DRA level ${level}. Format: Title\\n\\nStory. No word counts.`;
+      if (isExpansion && currentBook) {
+        prompt = `Write a short "Part 2" for the story: ${currentBook.text}. Keep it at DRA level ${level}. Format: Title (Part 2)\\n\\nStory.`;
+      }
+      const text = await callGemini(prompt);
+      const parts = text.trim().split('\n\n');
+      setCurrentBook({ title: parts[0], text: parts.slice(1).join('\n\n') });
+      setMessage(`Level: ${level}`);
+    } catch (e) {
+      setMessage("Error creating story.");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const getCoachFeedback = async () => {
+    if (!sessionResults) return;
+    setIsAiProcessing(true);
+    try {
+        const prompt = `Act as a supportive reading coach for a child. Accuracy: ${Math.round(sessionResults.accuracy * 100)}%. Transcript: "${sessionResults.transcript}". Original Text: "${currentBook.text}". 2 sentences of encouraging feedback.`;
+        const feedback = await callGemini(prompt);
+        setAiCoachFeedback(feedback);
+    } catch (e) {
+        setAiCoachFeedback("You're doing a great job! Keep reading every day!");
+    } finally {
+        setIsAiProcessing(false);
+    }
+  };
+
+  const generateQuiz = async () => {
+    if (!currentBook) return;
+    setIsAiProcessing(true);
+    try {
+      const prompt = `Generate 3 multiple choice questions for a child about: ${currentBook.text}. Respond ONLY JSON: { "questions": [{ "q": "...", "options": ["...", "..."], "correct": "..." }] }`;
+      const text = await callGemini(prompt);
+      const data = JSON.parse(text.replace(/```json|```/g, ''));
+      setQuiz(data.questions);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsAiProcessing(false);
+    }
+  };
+
+  const handleQuizAnswer = (qIdx, option) => {
+    setQuizAnswers(prev => ({ ...prev, [qIdx]: option }));
+  };
+
+  const explainWord = async (word) => {
+    setIsAiProcessing(true);
+    try {
+      const prompt = `Explain "${word}" to a DRA level ${DRA_LEVELS[currentLevelIndex]} reader. Respond ONLY JSON: { "definition": "...", "example": "..." }`;
+      const text = await callGemini(prompt);
+      const data = JSON.parse(text.replace(/```json|```/g, ''));
+      setWordExplanation({ word, ...data });
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsAiProcessing(false);
+    }
+  };
+
+  const processReading = async (transcript) => {
+    if (!currentBook || !transcript) {
+        setMessage("No speech detected. Try again!");
+        return;
+    }
+    const expected = getNormalizedWords(currentBook.text);
+    const actual = getNormalizedWords(transcript);
+    
+    let correct = 0;
+    const feedback = expected.map(word => {
+      const isCorrect = actual.includes(word);
+      if (isCorrect) correct++;
+      return { word, status: isCorrect ? 'Correct' : 'Incorrect' };
+    });
+
+    const accuracy = correct / expected.length;
+    const isSuccess = accuracy >= ACCURACY_THRESHOLD;
+    
+    let nextLvl = currentLevelIndex;
+    let nextStrk = isSuccess ? successStreak + 1 : 0;
+    let advanced = false;
+
+    if (isSuccess && nextStrk >= SUCCESS_STREAK_TO_ADVANCE) {
+      nextLvl = Math.min(currentLevelIndex + 1, DRA_LEVELS.length - 1);
+      nextStrk = 0;
+      advanced = true;
+    }
+
+    setCurrentLevelIndex(nextLvl);
+    setSuccessStreak(nextStrk);
+
+    const res = { accuracy, isSuccess, transcript, feedback, advanced };
+    setSessionResults(res);
+    
+    if (db && user) {
+        await setDoc(doc(db, 'artifacts', envAppId, 'public', 'data', 'reading_profiles', currentProfileName), {
+            currentLevelIndex: nextLvl,
+            successStreak: nextStrk,
+            lastUpdated: new Date().toISOString()
+        }, { merge: true });
+    }
+  };
+
+  const startListening = () => {
+    if (!recognitionRef.current) return;
+    isManuallyStopping.current = false;
+    setCapturedTranscript('');
+    setIsCountingDown(true);
+    let count = 3;
+    setCountdown(count);
+    const timer = setInterval(() => {
+      count--;
+      setCountdown(count);
+      if (count === 1) {
+        try { recognitionRef.current.start(); } catch(e) {}
+      }
+      if (count === 0) {
+        clearInterval(timer);
+        setIsCountingDown(false);
+        setIsListening(true);
+      }
+    }, 1000);
+  };
+
+  const stopAndScore = () => {
+    if (recognitionRef.current) {
+        isManuallyStopping.current = true;
+        try {
+            recognitionRef.current.stop();
+        } catch(e) {}
+        setIsListening(false);
+        setTimeout(() => {
+            processReading(capturedTranscript);
+        }, 500);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-indigo-50 p-4 md:p-8 font-sans">
+      <script src="https://cdn.tailwindcss.com"></script>
+      <div className="max-w-2xl mx-auto space-y-6">
+        <header className="bg-white p-6 rounded-3xl shadow-xl flex justify-between items-center border-b-4 border-indigo-200">
+          <div>
+            <h1 className="text-2xl font-black text-indigo-600">Reading Buddy</h1>
+            <p className="text-sm font-bold text-slate-400">Student: {currentProfileName}</p>
+          </div>
+          <div className="text-right">
+            <span className="text-[10px] font-black text-indigo-300 uppercase block tracking-tighter">Level</span>
+            <span className="text-2xl font-black text-indigo-900 leading-none">{DRA_LEVELS[currentLevelIndex]}</span>
+            <div className="mt-2 flex gap-1 justify-end">
+                {[...Array(SUCCESS_STREAK_TO_ADVANCE)].map((_, i) => (
+                    <div key={i} className={`h-2 w-6 rounded-full ${i < successStreak ? 'bg-green-500' : 'bg-slate-200'}`} />
+                ))}
+            </div>
+          </div>
+        </header>
+
+        <main className="bg-white p-8 rounded-3xl shadow-xl space-y-8">
+          <div className="flex justify-between items-center">
+            <h2 className="text-lg font-black text-slate-700">Practice Time</h2>
+            <button 
+                onClick={() => generateBook()} 
+                disabled={isLoading || isListening}
+                className="px-6 py-2 bg-indigo-600 text-white font-bold rounded-2xl hover:bg-indigo-700 disabled:opacity-50 transition-all shadow-lg text-sm"
+            >
+                {isLoading ? 'Writing...' : 'New Story'}
+            </button>
+          </div>
+
+          {currentBook ? (
+            <div className="space-y-8">
+              {storyImage ? (
+                <div className="rounded-3xl overflow-hidden shadow-xl border-4 border-indigo-100">
+                  <img src={storyImage} alt="Story" className="w-full h-auto object-cover max-h-64" />
+                </div>
+              ) : (
+                !sessionResults && (
+                  <button 
+                    onClick={() => generateImage(currentBook.text)}
+                    disabled={isImageGenerating}
+                    className="w-full py-4 border-2 border-dashed border-indigo-200 text-indigo-400 font-bold rounded-3xl hover:bg-indigo-50 transition-all text-sm"
+                  >
+                    {isImageGenerating ? '✨ Drawing scene...' : '✨ Generate Story Scene'}
+                  </button>
+                )
+              )}
+
+              <div className="p-10 bg-slate-50 rounded-[2.5rem] border-4 border-indigo-50 text-center relative">
+                <h3 className="text-xl font-bold text-indigo-400 mb-6 italic">{currentBook.title}</h3>
+                <p className="text-3xl md:text-4xl leading-relaxed font-medium text-slate-800 tracking-tight">
+                  {currentBook.text}
+                </p>
+                {isListening && capturedTranscript && (
+                    <div className="mt-8 p-4 bg-white/60 rounded-2xl border border-indigo-100 text-sm italic text-indigo-500 animate-pulse">
+                        "{capturedTranscript}..."
+                    </div>
+                )}
+              </div>
+
+              <div className="flex gap-4">
+                {!isListening && !isCountingDown ? (
+                  <button onClick={startListening} className="flex-1 py-6 bg-green-500 text-white rounded-3xl font-black text-2xl shadow-xl hover:bg-green-600 transition-all">START READING</button>
+                ) : isCountingDown ? (
+                  <button className="flex-1 py-6 bg-yellow-400 text-white rounded-3xl font-black text-4xl animate-bounce">{countdown}</button>
+                ) : (
+                  <button onClick={stopAndScore} className="flex-1 py-6 bg-red-500 text-white rounded-3xl font-black text-2xl shadow-xl animate-pulse">I'M DONE!</button>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="py-20 text-center space-y-4">
+              <div className="text-8xl animate-bounce">📚</div>
+              <p className="text-slate-400 font-bold text-xl">Ready for a story?</p>
+            </div>
+          )}
+        </main>
+
+        {sessionResults && (
+          <div className="space-y-6 animate-in slide-in-from-bottom duration-500 pb-10">
+            <div className={`p-8 rounded-3xl border-4 shadow-2xl ${sessionResults.isSuccess ? 'bg-green-50 border-green-200' : 'bg-orange-50 border-orange-200'}`}>
+              <div className="flex justify-between items-end mb-6">
+                  <div>
+                    <h3 className="text-4xl font-black text-slate-800">{Math.round(sessionResults.accuracy * 100)}%</h3>
+                    <p className="text-sm font-bold text-slate-500 uppercase tracking-tighter">Accuracy Score</p>
+                  </div>
+                  <div className={`px-6 py-2 rounded-full font-black text-sm uppercase tracking-widest ${sessionResults.isSuccess ? 'bg-green-500 text-white' : 'bg-orange-500 text-white'}`}>
+                    {sessionResults.isSuccess ? 'Amazing!' : 'Keep Trying!'}
+                  </div>
+              </div>
+              
+              <div className="p-6 bg-white/50 backdrop-blur rounded-2xl flex flex-wrap gap-3 mb-6 shadow-inner">
+                  {sessionResults.feedback.map((f, i) => (
+                    <button 
+                      key={i} 
+                      onClick={() => f.status === 'Incorrect' && explainWord(f.word)}
+                      className={`text-xl font-bold transition-transform hover:scale-110 ${f.status === 'Correct' ? 'text-green-600' : 'text-red-300 line-through decoration-red-500 decoration-4 cursor-help'}`}
+                    >
+                      {f.word}
+                    </button>
+                  ))}
+              </div>
+
+              {aiCoachFeedback ? (
+                <div className="bg-white p-5 rounded-2xl border-2 border-indigo-100 mb-6 shadow-sm flex items-start gap-3">
+                    <span className="text-3xl">✨</span>
+                    <p className="text-slate-700 font-medium italic">{aiCoachFeedback}</p>
+                </div>
+              ) : (
+                <button 
+                    onClick={getCoachFeedback}
+                    disabled={isAiProcessing}
+                    className="w-full py-3 bg-white text-indigo-600 border-2 border-indigo-200 rounded-2xl font-bold mb-6 hover:bg-indigo-50 shadow-sm"
+                >
+                    {isAiProcessing ? 'Thinking...' : '✨ Get AI Coach Feedback'}
+                </button>
+              )}
+              
+              <div className="flex gap-4">
+                 {!quiz && (
+                   <button 
+                    onClick={generateQuiz}
+                    disabled={isAiProcessing}
+                    className="flex-1 py-3 bg-indigo-600 text-white rounded-2xl font-bold hover:bg-indigo-700 shadow-md"
+                   >
+                     {isAiProcessing ? 'Thinking...' : '✨ Take Quiz'}
+                   </button>
+                 )}
+                 <button 
+                    onClick={() => generateBook(null, true)}
+                    className="flex-1 py-3 bg-indigo-100 text-indigo-700 rounded-2xl font-bold hover:bg-indigo-200"
+                 >
+                    ✨ Next Chapter
+                 </button>
+              </div>
+
+              {sessionResults.advanced && (
+                <div className="mt-6 bg-indigo-600 text-white p-4 rounded-2xl text-center font-black animate-pulse text-lg shadow-lg">
+                  🎉 LEVEL UP! Moving to {DRA_LEVELS[currentLevelIndex]}
+                </div>
+              )}
+            </div>
+
+            {wordExplanation && (
+              <div className="bg-white p-6 rounded-3xl shadow-xl border-l-8 border-indigo-500 animate-in fade-in zoom-in duration-300">
+                <div className="flex justify-between items-start mb-4">
+                  <h4 className="text-2xl font-black text-indigo-600">"{wordExplanation.word}"</h4>
+                  <button onClick={() => setWordExplanation(null)} className="text-slate-300 hover:text-slate-600">✕</button>
+                </div>
+                <p className="text-slate-700 font-medium text-lg mb-2">{wordExplanation.definition}</p>
+                <p className="text-indigo-400 italic text-sm">Example: {wordExplanation.example}</p>
+              </div>
+            )}
+
+            {quiz && (
+              <div className="bg-white p-8 rounded-3xl shadow-xl space-y-8 border-t-8 border-indigo-500 animate-in slide-in-from-bottom duration-500">
+                <h3 className="text-xl font-black text-indigo-900">✨ Reading Quiz</h3>
+                {quiz.map((q, qIdx) => {
+                  const selected = quizAnswers[qIdx];
+                  const hasAnswered = !!selected;
+                  return (
+                    <div key={qIdx} className="space-y-4 p-4 rounded-2xl bg-slate-50 border border-slate-100">
+                      <p className="font-bold text-slate-700 text-lg leading-tight">{qIdx + 1}. {q.q}</p>
+                      <div className="grid grid-cols-1 gap-3">
+                        {q.options.map((opt, oIdx) => (
+                          <button 
+                            key={oIdx}
+                            disabled={hasAnswered}
+                            onClick={() => handleQuizAnswer(qIdx, opt)}
+                            className={`p-4 rounded-xl text-left border-2 transition-all font-bold text-sm ${
+                                hasAnswered 
+                                ? opt === q.correct ? 'bg-green-100 border-green-500 text-green-700' : opt === selected ? 'bg-red-50 border-red-300 text-red-400' : 'bg-white opacity-50'
+                                : 'bg-white border-slate-200 text-slate-600 hover:border-indigo-400 shadow-sm'
+                            }`}
+                          >
+                            {opt}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+        <footer className="text-center text-indigo-300 font-black uppercase text-[10px] tracking-[0.2em] pb-10">{message}</footer>
+      </div>
+    </div>
+  );
+}
+
+export default App;

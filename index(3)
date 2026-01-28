@@ -1,0 +1,85 @@
+<script>
+let level = 1;
+let transcript = "";
+let listening = false;
+
+const levelEl = document.getElementById("level");
+const storyEl = document.getElementById("story");
+const statusEl = document.getElementById("status");
+
+let storyText = "The cat sat on the mat. The cat was happy.";
+
+storyEl.innerText = storyText;
+
+const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+if (!SpeechRecognition) {
+  statusEl.innerText = "Speech recognition not supported in this browser.";
+}
+
+const recognition = new SpeechRecognition();
+recognition.lang = "en-US";
+recognition.continuous = true;
+recognition.interimResults = true;
+
+recognition.onstart = () => {
+  listening = true;
+  transcript = "";
+  statusEl.innerText = "🎤 Listening... read out loud";
+};
+
+recognition.onresult = (event) => {
+  transcript = "";
+  for (let i = 0; i < event.results.length; i++) {
+    transcript += event.results[i][0].transcript + " ";
+  }
+  statusEl.innerText = "🎤 Listening...\nTranscript so far:\n" + transcript;
+};
+
+recognition.onerror = (event) => {
+  statusEl.innerText = "Speech error: " + event.error;
+};
+
+recognition.onend = () => {
+  if (!listening) return;
+  listening = false;
+  scoreReading();
+};
+
+function startReading() {
+  transcript = "";
+  recognition.start();
+}
+
+function stopReading() {
+  recognition.stop();
+}
+
+function scoreReading() {
+  if (!transcript.trim()) {
+    statusEl.innerText = "No speech detected. Try again.";
+    return;
+  }
+
+  // normalize words
+  const targetWords = storyText.toLowerCase().replace(/[^\w\s]/g,"").split(" ");
+  const spokenWords = transcript.toLowerCase().replace(/[^\w\s]/g,"").split(" ");
+
+  let correct = 0;
+  targetWords.forEach(word => {
+    if (spokenWords.includes(word)) correct++;
+  });
+
+  const accuracy = Math.round((correct / targetWords.length) * 100);
+
+  statusEl.innerText = `Transcript:\n"${transcript.trim()}"\n\nAccuracy: ${accuracy}%`;
+
+  if (accuracy >= 80) {
+    level++;
+    levelEl.innerText = level;
+    storyText = "The dog ran in the park. The dog played with a ball.";
+    storyEl.innerText = storyText;
+    statusEl.innerText += "\n🎉 Level up!";
+  }
+}
+</script>

@@ -1,0 +1,79 @@
+<script>
+let level = 1;
+let transcript = "";
+let listening = false;
+
+const storyEl = document.getElementById("story");
+const statusEl = document.getElementById("status");
+const levelEl = document.getElementById("level");
+
+let targetText = storyEl.innerText.toLowerCase();
+
+const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+if (!SpeechRecognition) {
+  statusEl.innerText = "Speech recognition not supported in this browser.";
+}
+
+const recognition = new SpeechRecognition();
+recognition.lang = "en-US";
+recognition.continuous = true;
+recognition.interimResults = true;
+
+recognition.onstart = () => {
+  listening = true;
+  statusEl.innerText = "🎤 Listening... read out loud";
+};
+
+recognition.onresult = (event) => {
+  transcript = "";
+  for (let i = 0; i < event.results.length; i++) {
+    transcript += event.results[i][0].transcript + " ";
+  }
+};
+
+recognition.onerror = (event) => {
+  statusEl.innerText = "Speech error: " + event.error;
+};
+
+recognition.onend = () => {
+  if (!listening) return;
+  listening = false;
+  scoreReading();
+};
+
+function startReading() {
+  transcript = "";
+  recognition.start();
+}
+
+function stopReading() {
+  recognition.stop();
+}
+
+function scoreReading() {
+  const spoken = transcript.toLowerCase().trim();
+  if (!spoken) {
+    statusEl.innerText = "No speech detected. Try again.";
+    return;
+  }
+
+  const targetWords = targetText.split(" ");
+  let correct = 0;
+
+  targetWords.forEach(word => {
+    if (spoken.includes(word)) correct++;
+  });
+
+  const accuracy = Math.round((correct / targetWords.length) * 100);
+  statusEl.innerText = `Accuracy: ${accuracy}%`;
+
+  if (accuracy >= 80) {
+    level++;
+    levelEl.innerText = level;
+    storyEl.innerText = "The dog ran in the park. The dog played with a ball.";
+    targetText = storyEl.innerText.toLowerCase();
+    statusEl.innerText += " 🎉 Level up!";
+  }
+}
+</script>

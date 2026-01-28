@@ -1,0 +1,89 @@
+<script>
+let level = 1;
+let transcript = "";
+let listening = false;
+
+const levelEl = document.getElementById("level");
+const storyEl = document.getElementById("story");
+const statusEl = document.getElementById("status");
+
+let storyText = "The cat sat on the mat. The cat was happy.";
+let words = [];
+
+function renderStory() {
+  storyEl.innerHTML = "";
+  words = storyText.split(" ").map(word => {
+    const span = document.createElement("span");
+    span.innerText = word;
+    span.className = "word";
+    storyEl.appendChild(span);
+    return span;
+  });
+}
+
+renderStory();
+
+const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+const recognition = new SpeechRecognition();
+
+recognition.lang = "en-US";
+recognition.continuous = true;
+recognition.interimResults = true;
+
+recognition.onstart = () => {
+  listening = true;
+  statusEl.innerText = "🎤 Listening... read out loud";
+};
+
+recognition.onresult = (event) => {
+  transcript = "";
+  for (let i = 0; i < event.results.length; i++) {
+    transcript += event.results[i][0].transcript + " ";
+  }
+};
+
+recognition.onend = () => {
+  if (!listening) return;
+  listening = false;
+  scoreReading();
+};
+
+function startReading() {
+  transcript = "";
+  words.forEach(w => w.classList.remove("correct", "incorrect"));
+  recognition.start();
+}
+
+function stopReading() {
+  recognition.stop();
+}
+
+function scoreReading() {
+  const spoken = transcript.toLowerCase();
+  let correctCount = 0;
+
+  words.forEach(span => {
+    const cleanWord = span.innerText
+      .toLowerCase()
+      .replace(/[^\w']/g, "");
+
+    if (spoken.includes(cleanWord)) {
+      span.classList.add("correct");
+      correctCount++;
+    } else {
+      span.classList.add("incorrect");
+    }
+  });
+
+  const accuracy = Math.round((correctCount / words.length) * 100);
+  statusEl.innerText = `Accuracy: ${accuracy}%`;
+
+  if (accuracy >= 80) {
+    level++;
+    levelEl.innerText = level;
+    storyText = "The dog ran in the park. The dog played with a ball.";
+    renderStory();
+    statusEl.innerText += " 🎉 Level up!";
+  }
+}
+</script>

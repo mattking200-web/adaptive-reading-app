@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Reading Buddy – Test Version</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <!-- Tailwind -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- React -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+
+  <!-- Babel -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body class="bg-indigo-50">
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useRef } = React;
+
+/************** CONFIG **************/
+const DRA_LEVELS = [
+  "A1","A2","1","2","3","4","6","8","10","12",
+  "14","16","18","20","24","28","30","34","38","40","50","60"
+];
+
+const ACCURACY_THRESHOLD = 0.9;
+const STREAK_TO_ADVANCE = 2;
+
+const normalize = text =>
+  text
+    .toLowerCase()
+    .replace(/[^a-z0-9'\s]/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean);
+
+const SpeechRecognition =
+  window.SpeechRecognition || window.webkitSpeechRecognition;
+
+/************** APP **************/
+function App() {
+  const [level, setLevel] = useState(0);
+  const [streak, setStreak] = useState(0);
+  const [story, setStory] = useState(null);
+  const [listening, setListening] = useState(false);
+  const [transcript, setTranscript] = useState("");
+  const [results, setResults] = useState(null);
+
+  const recRef = useRef(null);
+  const manualStop = useRef(false);
+
+  useEffect(() => {
+    if (!SpeechRecognition) return;
+    const r = new SpeechRecognition();
+    r.continuous = true;
+    r.interimResults = true;
+    r.lang = "en-US";
+
+    r.onresult = e => {
+      let t = "";
+      for (let i = 0; i < e.results.length; i++) {
+        t += e.results[i][0].transcript;
+      }
+      setTranscript(t);
+    };
+
+    r.onend = () => {
+      if (!manualStop.current && listening) {
+        try { r.start(); } catch {}
+      }
+    };
+
+    recRef.current = r;
+  }, [listening]);
+
+  const newStory = () => {
+    setResults(null);
+    setTranscript("");
+    setStory({
+      title: "The Lost Puppy",
+      text:
+        "A small puppy ran down the street. " +
+        "The puppy was scared. A girl found the puppy and took it home."
+    });
+  };
+
+  const startReading = () => {
+    manualStop.current = false;
+    setTranscript("");
+    recRef.current.start();
+    setListening(true);
+  };
+
+  const stopAndScore = () => {
+    manualStop.current = true;
+    recRef.current.stop();
+    setListening(false);
+
+    const expected = normalize(story.text);
+    const actual = normalize(transcript);
+    let correct = 0;
+
+    expected.forEach(w => actual.includes(w) && correct++);
+    const accuracy = correct / expected.length;
+    const success = accuracy >= ACCURACY_THRESHOLD;
+
+    let nextLevel = level;
+    let nextStreak = success ? streak + 1 : 0;
+    let advanced = false;
+
+    if (success && nextStreak >= STREAK_TO_ADVANCE) {
+      nextLevel = Math.min(level + 1, DRA_LEVELS.length - 1);
+      nextStreak = 0;
+      advanced = true;
+    }
+
+    setLevel(nextLevel);
+    setStreak(nextStreak);
+    setResults({ accuracy, success, advanced });
+  };
+
+  return (
+    <div className="max-w-2xl mx-auto p-6 space-y-6">
+      <header className="bg-white p-6 rounded-2xl shadow flex justify-between">
+        <div>
+          <h1 className="text-2xl font-black text-indigo-600">📚 Reading Buddy</h1>
+          <p className="text-sm font-bold text-slate-400">
+            DRA Level: {DRA_LEVELS[level]}
+          </p>
+        </div>
+        <div className="flex gap-1">
+          {[...Array(STREAK_TO_ADVANCE)].map((_, i) => (
+            <div
+              key={i}
+              className={`h-3 w-8 rounded-full ${
+                i < streak ? "bg-green-500" : "bg-slate-200"
+              }`}
+            />
+          ))}
+        </div>
+      </header>
+
+      <button
+        onClick={newStory}
+        className="w-full py-3 bg-indigo-600 text-white rounded-xl font-bold"
+      >
+        New Story
+      </button>
+
+      {story && (
+        <div className="bg-white p-8 rounded-2xl shadow space-y-6">
+          <h2 className="text-xl font-bold text-indigo-400">
+            {story.title}
+          </h2>
+          <p className="text-2xl leading-relaxed">{story.text}</p>
+
+          {!listening ? (
+            <button
+              onClick={startReading}
+              className="w-full py-4 bg-green-500 text-white rounded-xl font-black text-xl"
+            >
+              START READING
+            </button>
+          ) : (
+            <button
+              onClick={stopAndScore}
+              className="w-full py-4 bg-red-500 text-white rounded-xl font-black text-xl"
+            >
+              I'M DONE
+            </button>
+          )}
+
+          {listening && transcript && (
+            <p className="italic text-indigo-400 mt-4">
+              “{transcript}…”
+            </p>
+          )}
+        </div>
+      )}
+
+      {results && (
+        <div
+          className={`p-6 rounded-2xl shadow ${
+            results.success ? "bg-green-50" : "bg-orange-50"
+          }`}
+        >
+          <p className="text-3xl font-black">
+            {Math.round(results.accuracy * 100)}%
+          </p>
+          <p className="font-bold">
+            {results.success ? "Great job!" : "Keep trying!"}
+          </p>
+          {results.advanced && (
+            <p className="mt-2 font-black text-indigo-600">
+              🎉 LEVEL UP!
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>

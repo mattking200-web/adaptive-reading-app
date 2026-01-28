@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Reading Buddy Test</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+  body { font-family: Arial, sans-serif; background:#f4f8f3; padding:20px; }
+  button { padding:10px 16px; font-size:16px; margin:5px; }
+  #story { margin:20px 0; font-size:18px; }
+  #status { margin-top:10px; font-weight:bold; }
+</style>
+</head>
+<body>
+
+<h1>📘 Reading Buddy (Test Build)</h1>
+<p>Current Level: <span id="level">1</span></p>
+
+<div id="story">The cat sat on the mat. The cat was happy.</div>
+
+<button onclick="startReading()">🎤 Start Reading</button>
+<button onclick="stopReading()">⏹ Stop</button>
+
+<div id="status"></div>
+
+<script>
+let level = 1;
+let transcript = "";
+let listening = false;
+
+const levelEl = document.getElementById("level");
+const storyEl = document.getElementById("story");
+const statusEl = document.getElementById("status");
+
+let storyText = storyEl.innerText;
+
+// Initialize Web Speech API
+const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+if (!SpeechRecognition) {
+  statusEl.innerText = "Speech recognition not supported in this browser.";
+}
+
+const recognition = new SpeechRecognition();
+recognition.lang = "en-US";
+recognition.continuous = true;
+recognition.interimResults = true;
+
+recognition.onstart = () => {
+  listening = true;
+  transcript = "";
+  statusEl.innerText = "🎤 Listening...";
+};
+
+recognition.onresult = (event) => {
+  transcript = "";
+  for (let i = 0; i < event.results.length; i++) {
+    transcript += event.results[i][0].transcript + " ";
+  }
+};
+
+recognition.onerror = (event) => {
+  statusEl.innerText = "Speech error: " + event.error;
+};
+
+recognition.onend = () => {
+  if (!listening) return;
+  listening = false;
+  scoreReading();
+};
+
+function startReading() {
+  transcript = "";
+  recognition.start();
+}
+
+function stopReading() {
+  recognition.stop();
+}
+
+// Scoring function using positional word match
+function scoreReading() {
+  if (!transcript.trim()) {
+    statusEl.innerText = "No speech detected. Try again.";
+    return;
+  }
+
+  const normalize = text => text.toLowerCase().replace(/[^\w\s]/g,"").split(/\s+/).filter(Boolean);
+
+  const targetWords = normalize(storyText);
+  const spokenWords = normalize(transcript);
+
+  let correct = 0;
+  const len = Math.min(targetWords.length, spokenWords.length);
+
+  for (let i = 0; i < len; i++) {
+    if (targetWords[i] === spokenWords[i]) correct++;
+  }
+
+  const accuracy = Math.round((correct / targetWords.length) * 100);
+
+  statusEl.innerText = `Accuracy: ${accuracy}%`;
+
+  if (accuracy >= 80) {
+    level++;
+    levelEl.innerText = level;
+    storyText = "The dog ran in the park. The dog played with a ball.";
+    storyEl.innerText = storyText;
+    statusEl.innerText += " 🎉 Level up!";
+  }
+}
+</script>
+
+</body>
+</html>
